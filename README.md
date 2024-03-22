@@ -7,7 +7,7 @@ Data Driven Supernova Taxonomy Based on the Zwicky Transient Facility Bright Tra
 
 ## Intro Meeting Part 2 - 22 March 2024
 
-Attending: Igor, Matt, Xinyue, Willow
+Attending: Igor, Matt Nicholl, Xinyue, Willow
 
 ### Action Items
 1. **Downloading the data**: Igor ran into a few permissions snags with downloading the data from TNS. Matt and Xinyue suggested WISeREP, and Xinyue demonstrated being able to download the data from there. Xinyue and Matt after the meeting will figure out what query to use when gathering the data so we have that for future reference. Igor or Xinyue will download the data.
