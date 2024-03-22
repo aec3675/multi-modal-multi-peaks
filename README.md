@@ -1,6 +1,8 @@
 # Death-and-Taxes
 Data Driven Supernova Taxonomy Based on the Zwicky Transient Facility Bright Transient Survey
 
+Conspirators (in alphabetical order): Igor Andreoni, Federica Bianco, Willow Fox Fortino, Matthew Graham, Matt Nicholl, Xinyue Sheng
+
 ---
 
 # Meeting Notes
