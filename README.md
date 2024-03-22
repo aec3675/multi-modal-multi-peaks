@@ -1,6 +1,8 @@
 # Death-and-Taxes
 Data Driven Supernova Taxonomy Based on the Zwicky Transient Facility Bright Transient Survey
 
+---
+
 # Meeting Notes
 
 ## Intro Meeting Part 2 - 22 March 2024
