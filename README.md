@@ -3,9 +3,21 @@ Data Driven Supernova Taxonomy Based on the Zwicky Transient Facility Bright Tra
 
 # Meeting Notes
 
+## Intro Meeting Part 2 - 22 March 2024
+
+Attending: Igor, Matt, Xinyue, Willow
+
+### Action Items
+1. **Downloading the data**: Igor ran into a few permissions snags with downloading the data from TNS. Matt and Xinyue suggested WISeREP, and Xinyue demonstrated being able to download the data from there. Xinyue and Matt after the meeting will figure out what query to use when gathering the data so we have that for future reference. Igor or Xinyue will download the data.
+2. **Hosting the data**: We figured that the resulting size of the dataset should be no more than 1GB so we will host the data here on GitHub. Willow suggested using the parquet file format (with Python Pandas and PyArrow) which is a binary file format that will save space as well as read/writing time compared to csv files.
+3. **Future meetings**: Xinyue and Willow will plan to meet weekly to discuss the coding aspects of the project. The entire group will meet once every two weeks in order to direct the flow of the project.
+4. **Beginning coding**: Once any amount of data is uploaded to the GitHub repo, Xinyue and Willow can begin coding a preliminary autoencoder.
+
+---
+
 ## Intro Meeting Part 1 - 21 March 2024
 
-Attending: Federica, Igor, Matthew Graham, Sherry, Willow
+Attending: Federica, Igor, Matthew Graham, Xinyue, Willow
 
 ### Action Items
 1. **Downloading the data**: Igor will take the lead on downloading data from TNS. Depending on the complexity of the task or download bandwidth limitations, we will help him.
