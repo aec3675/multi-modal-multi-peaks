@@ -15,3 +15,7 @@ Scripts and notebooks for systematically downloading supernova spectra from the 
 This directory will contain scripts for combining and standardizing the SDSS and WISeREP data into a single big dataset (`tensors`).
 
 — Sid Chaini
+
+
+#### List of Updates
+- 

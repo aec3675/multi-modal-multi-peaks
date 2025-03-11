@@ -486,18 +486,10 @@ def verify_and_combine_data(datadir, logger=None):
                 logger.info(f"Removed {before_dedup - after_dedup} duplicate entries")
 
         output_file = os.path.join("wiserep_spectra_combined.csv")
-        combined_df.to_csv(output_file)
+        combined_df.to_csv(output_file, index=False)
         logger.info(
             f"Combined {len(df_list)} files with {len(combined_df)} total rows to {output_file}"
         )
-
-        # Save a summary of object types
-        if "Type" in combined_df.columns:
-            type_summary = combined_df["Type"].value_counts().to_frame()
-            type_summary.to_csv(os.path.join(datadir, "object_type_summary.csv"))
-            logger.info(
-                f"Saved object type summary with {len(type_summary)} different types"
-            )
 
         return combined_df
     else:
