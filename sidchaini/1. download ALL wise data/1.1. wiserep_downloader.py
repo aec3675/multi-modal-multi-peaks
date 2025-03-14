@@ -108,7 +108,7 @@ def download_wiserep_data(
     params = {
         "format": "csv",
         "files_type": "ascii",
-        "num_page": 100,
+        "num_page": 250,
         "page": int(page),
     }
 
@@ -486,7 +486,18 @@ def verify_and_combine_data(datadir, logger=None):
                 logger.info(f"Removed {before_dedup - after_dedup} duplicate entries")
 
         output_file = os.path.join("wiserep_spectra_combined.csv")
+
+        # Some formatting for combined_df
+        combined_df.index.name = "wise_objid"
+        combined_df = combined_df.reset_index(drop=False)
+        combined_df = combined_df.sort_values(by=["wise_objid", "JD"])
+        combined_df["IAU name"] = combined_df["IAU name"].str.strip()
+        combined_df["Publish"] = combined_df["Publish"].str.strip()
+        combined_df["Remarks"] = combined_df["Remarks"].str.strip()
+        combined_df["Created by"] = combined_df["Created by"].str.strip()
+        # Save this file
         combined_df.to_csv(output_file, index=False)
+
         logger.info(
             f"Combined {len(df_list)} files with {len(combined_df)} total rows to {output_file}"
         )
