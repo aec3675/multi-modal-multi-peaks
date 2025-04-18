@@ -166,3 +166,6 @@ sidchaini/1. download ALL wise data/wiserep_data/spectra
 sidchaini/1. download ALL wise data/wiserep_data/spectra.tar.gz
 
 
+sidchaini/3. read and make single dataset/p60_spectra_metadata.csv
+sidchaini/3. read and make single dataset/p60_spectra_for_unsupervised.csv
+sidchaini/3. read and make single dataset/p60_combined_spectra.csv

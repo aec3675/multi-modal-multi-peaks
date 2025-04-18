@@ -6,6 +6,7 @@ import json
 import requests
 import astropy
 import os
+import warnings  # Import the warnings module
 from astropy.io import ascii
 
 url = "https://raw.githubusercontent.com/sidchaini/LightCurveDistanceClassification/main/settings.txt"
@@ -19,6 +20,51 @@ sns.set_theme(**sns_dict)
 SCALE_FACTOR = 0.5  # scale factor for wavelength del to check wavelength range
 HANDCRAFTED_WL_MIN = 999  # angstrom
 HANDCRAFTED_WL_MAX = 15_000  # angstrom
+
+# Define common column names (lowercase) for robust identification
+# Prioritized order - more specific names first
+WAVELENGTH_COLUMN_NAMES = [
+    "wavelength",
+    "#wavelength",
+    "wavelen",
+    "wavelength_angstrom",
+    "lambda_aa",
+    "wavelength(aa)",
+    "wavelength(angstroms)",
+    "wavelength (å)",
+    "wl[å]",
+    "wave",
+    "wav",
+    "wl",
+    "lambda",
+    "lam",
+    "wave-obs",
+    "waveobs",
+    "obswave",
+    "air_wave",
+    "vacuum_wave",
+    "wavelength(um)",
+]
+
+FLUX_COLUMN_NAMES = [
+    "flux",
+    "flux_density",
+    "flam",
+    "flambda",
+    "f_lam",
+    "intensity",
+    "flux(flam)",
+    "flux (erg/s/cm2/å)",
+    "flux[μjy]",
+    "normalized_flux",
+    "absflux",
+    "flux_tell_corrected",
+    "flux_not_tell_corrected",
+    "flux_smoothed",
+    "spec_sum",
+    "spec_optimal",
+    "response",
+]
 
 # Functions to read spectra files
 
@@ -231,9 +277,11 @@ def check_spectrafile(df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
 
     This function performs several validation checks on the input spectrum dataframe:
     1. Verifies the number of rows matches the expected count based on wavelength range and step size (Error #1)
-    2. Checks that the dataframe has a supported number of columns (2, 3, or 4) (Error #2)
-    3. Extracts wavelength and flux data from the first two columns
-    4. Delegates to check_wavelengthflux() for additional validation of:
+    2. Identifies wavelength and flux columns, first by searching for common names (case-insensitive),
+       then falling back to positional indexing (columns 0 and 1). Raises errors if columns cannot be
+       uniquely identified or if positional fallback is needed but insufficient columns exist (Errors #2a, #2b).
+    3. Extracts the identified wavelength and flux data.
+    4. Delegates to check_wavelengthflux() for detailed validation of the extracted data:
        - 4.1. Wavelength range boundaries (Errors #3, #4)
        - 4.2. Monotonically increasing wavelengths (Error #5)
        - 4.3. Wavelength unit conversion if needed (Error #6)
@@ -264,9 +312,12 @@ def check_spectrafile(df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
     Raises:
     -------
     ValueError
-        If number of rows doesn't match expected count (Error #1) or if data validation in check_wavelengthflux fails (Errors #3, #4, #5, #7, #8, #11)
+        If number of rows doesn't match expected count (Error #1)
+        If wavelength/flux columns are identified as the same name (Error #2a)
+        If columns aren't found by name and DataFrame has < 2 columns for positional fallback (Error #2b)
+        If data validation in check_wavelengthflux fails (Errors #3-#5, #7, #8, #11, #12-#15)
     NotImplementedError
-        If dataframe has unsupported number of columns (Error #2) or if unit conversions are not implemented (Errors #6, #9, #10)
+        If unit conversions are not implemented in check_wavelengthflux (Errors #6, #9, #10)
     """
     # 1. Check if number of rows matches expected count based on wavelength range
     n_samples = int((lambda_max - lambda_min) // del_lambda)
@@ -275,14 +326,106 @@ def check_spectrafile(df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
             f"Error #1 (check_spectrafile): Expected {n_samples} or {n_samples + 1} rows based on wavelength range, but got {df.shape[0]}"
         )
 
-    # 2. Check if dataframe has a supported number of columns (2, 3, or 4)
-    if df.shape[1] in [2, 3, 4]:
-        # 3. Extract wavelength and flux data from the first two columns
-        wavelength, flux = df.iloc[:, 0].to_numpy(), df.iloc[:, 1].to_numpy()
+    # # OLD
+    # # 2. Check if dataframe has a supported number of columns (2, 3,
+    # or 4)
+    # if df.shape[1] in [2, 3, 4]:
+    #     # 3. Extract wavelength and flux data from the first two
+    #     columns
+    #     wavelength, flux = df.iloc[:, 0].to_numpy(), df.iloc[:, 1].
+    #     to_numpy()
+    # else:
+    #     raise NotImplementedError(
+    #         f"Error #2 (check_spectrafile): Processing for dataframes
+    #         with {df.shape[1]} columns is not supported yet"
+    #     )
+
+    # 2. Identify wavelength and flux columns
+    original_columns = df.columns
+    lower_columns = [str(col).lower() for col in original_columns]
+    wavelength_col_name = None
+    flux_col_name = None
+
+    # Find wavelength column by name
+    for name in WAVELENGTH_COLUMN_NAMES:
+        try:
+            idx = lower_columns.index(name)
+            wavelength_col_name = original_columns[idx]
+            break
+        except ValueError:
+            continue
+
+    # Find flux column by name
+    for name in FLUX_COLUMN_NAMES:
+        try:
+            idx = lower_columns.index(name)
+            # Ensure it's not the same column as wavelength
+            if original_columns[idx] != wavelength_col_name:
+                flux_col_name = original_columns[idx]
+                break
+            # If it IS the same column, continue searching for other flux names
+        except ValueError:
+            continue
+
+    # 3. Extract wavelength and flux data based on identification
+    if wavelength_col_name and flux_col_name:
+        # Found both by name
+        wavelength = df[wavelength_col_name].to_numpy()
+        flux = df[flux_col_name].to_numpy()
+    elif wavelength_col_name and not flux_col_name:
+        # Found wavelength by name, try positional for flux (if >1 column exists)
+        if df.shape[1] > 1:
+            # Try second column by position, assuming it's not the identified wavelength col
+            potential_flux_idx = (
+                1 if df.columns.get_loc(wavelength_col_name) == 0 else 0
+            )
+            flux_col_name = original_columns[potential_flux_idx]
+            warnings.warn(
+                f"Wavelength column '{wavelength_col_name}' found by name, but flux column not found. "
+                f"Falling back to positional column '{flux_col_name}' (index {potential_flux_idx}) for flux.",
+                UserWarning,
+            )
+            wavelength = df[wavelength_col_name].to_numpy()
+            flux = df[flux_col_name].to_numpy()
+            # Optional: Add a warning here about fallback for flux?
+        else:
+            raise ValueError(
+                f"Error #2b (check_spectrafile): Found wavelength column '{wavelength_col_name}' by name, but cannot determine flux column positionally (only {df.shape[1]} column)"
+            )
+
+    elif not wavelength_col_name and flux_col_name:
+        # Found flux by name, try positional for wavelength (if >1 column exists)
+        if df.shape[1] > 1:
+            # Try first column by position, assuming it's not the identified flux col
+            potential_wl_idx = 0 if df.columns.get_loc(flux_col_name) == 1 else 1
+            wavelength_col_name = original_columns[potential_wl_idx]
+            warnings.warn(
+                f"Flux column '{flux_col_name}' found by name, but wavelength column not found. "
+                f"Falling back to positional column '{wavelength_col_name}' (index {potential_wl_idx}) for wavelength.",
+                UserWarning,
+            )
+            wavelength = df[wavelength_col_name].to_numpy()
+            flux = df[flux_col_name].to_numpy()
+            # Optional: Add a warning here about fallback for wavelength?
+        else:
+            raise ValueError(
+                f"Error #2b (check_spectrafile): Found flux column '{flux_col_name}' by name, but cannot determine wavelength column positionally (only {df.shape[1]} column)"
+            )
     else:
-        raise NotImplementedError(
-            f"Error #2 (check_spectrafile): Processing for dataframes with {df.shape[1]} columns is not supported yet"
-        )
+        # Fallback to positional if neither found by name (and at least 2 columns exist)
+        if df.shape[1] >= 2:
+            wavelength = df.iloc[:, 0].to_numpy()
+            flux = df.iloc[:, 1].to_numpy()
+            warnings.warn(
+                f"Could not identify wavelength or flux columns by name. "
+                f"Falling back to positional columns: index 0 ('{df.columns[0]}') for wavelength, index 1 ('{df.columns[1]}') for flux.",
+                UserWarning,
+            )
+            # Optional: Add a warning here about positional fallback?
+        else:
+            raise ValueError(
+                f"Error #2b (check_spectrafile): Could not identify wavelength/flux columns by name, and only {df.shape[1]} column(s) available for positional fallback."
+            )
 
     # 4. Delegate to check_wavelengthflux() for additional validation
     # 4.1. Check wavelength range boundaries
