@@ -6,7 +6,7 @@ import json
 import requests
 import astropy
 import os
-import warnings  # Import the warnings module
+import warnings
 from astropy.io import ascii
 
 url = "https://raw.githubusercontent.com/sidchaini/LightCurveDistanceClassification/main/settings.txt"
@@ -20,6 +20,16 @@ sns.set_theme(**sns_dict)
 SCALE_FACTOR = 0.5  # scale factor for wavelength del to check wavelength range
 HANDCRAFTED_WL_MIN = 999  # angstrom
 HANDCRAFTED_WL_MAX = 15_000  # angstrom
+
+# Thresholds for flux positivity checks
+MIN_POSITIVE_FLUX_FRACTION = 0.80  # For general positivity check in check_flux_positive
+MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK = (
+    0.75  # For unit plausibility check in check_flux_units_erg_cm2_s_ang
+)
+
+# Plausible flux range for erg cm-2 s-1 Å-1 unit check
+FLUX_UNIT_CHECK_MIN_MAG = 1e-18
+FLUX_UNIT_CHECK_MAX_MAG = 1e-10
 
 # Define common column names (lowercase) for robust identification
 # Prioritized order - more specific names first
@@ -195,7 +205,7 @@ def check_wavelength_increasing(wavelengths):
     return is_increasing
 
 
-def check_flux_positive(flux, frac_positive=0.8):
+def check_flux_positive(flux, frac_positive=MIN_POSITIVE_FLUX_FRACTION):
     """
     Check if a sufficient fraction of flux values are positive.
 
@@ -203,7 +213,7 @@ def check_flux_positive(flux, frac_positive=0.8):
     -----------
     flux : numpy.ndarray
         1D array of flux values
-    frac_positive : float, default=0.8
+    frac_positive : float, default=MIN_POSITIVE_FLUX_FRACTION
         Minimum fraction of positive flux values required
 
     Returns:
@@ -216,15 +226,18 @@ def check_flux_positive(flux, frac_positive=0.8):
     return is_positive
 
 
-def check_flux_units_erg_cm2_s_ang(flux, frac_positive_threshold=0.75):
+def check_flux_units_erg_cm2_s_ang(
+    flux, frac_positive_threshold=MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK
+):
     """
     Checks if unlabeled flux values are plausibly in units of
     'erg cm(-2) sec(-1) Ang(-1)' based on a magnitude range
     and basic signal properties.
 
     Astronomical sources commonly observed in optical/NIR spectra have flux densities
-    in these units typically falling between roughly 1e-18 and 1e-10.
-    This check verifies if the median absolute flux falls within this plausible range.
+    in these units typically falling between roughly FLUX_UNIT_CHECK_MIN_MAG
+    and FLUX_UNIT_CHECK_MAX_MAG. This check verifies if the median absolute flux
+    falls within this plausible range.
     It also requires a minimum fraction of flux values to be positive, helping
     to distinguish signal from pure noise centered on zero.
 
@@ -232,7 +245,7 @@ def check_flux_units_erg_cm2_s_ang(flux, frac_positive_threshold=0.75):
     -----------
     flux : numpy.ndarray
         Flux values to check. Assumed to be cleaned of NaNs if necessary.
-    frac_positive_threshold : float, optional
+    frac_positive_threshold : float, optional, default=MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK
         Minimum fraction of positive flux values required.
     Returns:
     --------
@@ -257,7 +270,9 @@ def check_flux_units_erg_cm2_s_ang(flux, frac_positive_threshold=0.75):
     if np.isnan(median_abs_flux):
         return False
 
-    is_in_range = (median_abs_flux > 1e-18) and (median_abs_flux < 1e-10)
+    is_in_range = (median_abs_flux > FLUX_UNIT_CHECK_MIN_MAG) and (
+        median_abs_flux < FLUX_UNIT_CHECK_MAX_MAG
+    )
 
     # Check 2: Ensure it's not just noise around zero (sufficient positive values)
     # Use nanmean to ignore NaNs when calculating the fraction
@@ -306,8 +321,9 @@ def check_spectrafile(df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
 
     Returns:
     --------
-    None
-        Function raises ValueError or NotImplementedError if validation fails
+    tuple[str, str]
+        Returns a tuple containing the identified wavelength column name and flux column name.
+        Function raises ValueError or NotImplementedError if validation fails or columns cannot be identified.
 
     Raises:
     -------
@@ -437,6 +453,8 @@ def check_spectrafile(df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
     check_wavelengthflux(
         wavelength, flux, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
     )
+
+    return wavelength_col_name, flux_col_name
 
 
 def check_wavelengthflux(
@@ -579,6 +597,7 @@ def check_and_plot_spectra(
     """
     Wrapper function that loads a spectrum file, performs validation checks, and optionally plots it.
 
+    Gets validated column names from check_spectrafile to ensure correct plotting.
     """
     if meta_df.index.name != "Ascii file":
         meta_df.set_index("Ascii file")
@@ -588,22 +607,21 @@ def check_and_plot_spectra(
 
     wl_unit = spectra_meta["WL Units"]
     spec_unit = spectra_meta["Spec. units"]
-    flux_ucoeff = spectra_meta["Flux Unit Coefficient"]
+    # flux_ucoeff = spectra_meta["Flux Unit Coefficient"]
     lambda_min = spectra_meta["Lambda-min"]
     lambda_max = spectra_meta["Lambda-max"]
     del_lambda = spectra_meta["Del-Lambda"]
 
-    # Perform validation checks
-    check_spectrafile(
+    # Perform validation checks and get identified column names
+    wl_col, flux_col = check_spectrafile(
         spectra_df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
     )
 
     # Plot the spectrum if requested
     if plot:
-        import matplotlib.pyplot as plt
-
-        x = spectra_df.to_numpy()[:, 0]  # wavelength
-        y = spectra_df.to_numpy()[:, 1]  # flux
+        # Use identified column names for plotting
+        x = spectra_df[wl_col].to_numpy()  # wavelength
+        y = spectra_df[flux_col].to_numpy()  # flux
         plt.figure(figsize=(10, 6))
         plt.plot(x, y)
         plt.xlabel("Wavelength (Å)")
