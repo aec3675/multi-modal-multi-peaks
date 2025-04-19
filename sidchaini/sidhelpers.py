@@ -1,459 +1,535 @@
+"""
+Helper functions for astronomical spectra analysis, including reading, validation, and plotting.
+
+Error Numbering Convention:
+Errors raised by functions in this module follow an 'X.Y' format:
+'Error X.Y (function_name): Message'
+
+Where 'X' denotes the logical task category and 'Y' is the specific error within that category.
+This provides traceability and allows related errors to be grouped.
+
+Category Summary:
+1.x: _find_spectral_columns - Column identification failures during positional fallback.
+2.x: read_spectra - File reading process errors (e.g., reader type, all readers fail).
+3.x: check_spectrafile - Initial parameter checks (e.g., Del-Lambda).
+4.x: check_spectrafile - Row count validation.
+5.x: check_spectrafile - Handling re-raised errors from column identification.
+6.x: check_spectrafile - Data extraction/conversion failures (e.g., KeyError, TypeError).
+7.x: check_wavelengthflux - Basic data integrity checks (NaN, Inf).
+8.x: check_wavelengthflux - Wavelength unit conversion issues.
+9.x: check_wavelengthflux - Wavelength validation against metadata (range, monotonicity).
+10.x: check_wavelengthflux - Wavelength validation against physical plausibility limits.
+11.x: check_wavelengthflux - Flux unit handling/validation (plausibility, known types).
+12.x: check_wavelengthflux - Flux value checks (positivity).
+13.x: check_and_plot_spectra - Metadata lookup errors.
+14.x: check_and_plot_spectra - Data conversion errors during plotting preparation.
+"""
+
+# --- Standard Library Imports ---
+import os
+import json
+import warnings
+
+# --- Third-Party Imports ---
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import json
 import requests
 import astropy
-import os
-import warnings
 from astropy.io import ascii
 
-url = "https://raw.githubusercontent.com/sidchaini/LightCurveDistanceClassification/main/settings.txt"
-response = requests.get(url)
-assert response.status_code == 200
-settings_dict = json.loads(response.text)
+# --- Configuration & Global Settings ---
+# Fetch settings from remote URL (e.g., plotting styles)
+try:
+    _SETTINGS_URL = "https://raw.githubusercontent.com/sidchaini/LightCurveDistanceClassification/main/settings.txt"
+    _response = requests.get(_SETTINGS_URL)
+    _response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+    _settings_dict = json.loads(_response.text)
+    _sns_dict = _settings_dict.get("sns_dict", {})  # Use .get for safety
+    sns.set_theme(**_sns_dict)
+except requests.exceptions.RequestException as e:
+    warnings.warn(
+        f"Could not fetch settings from {_SETTINGS_URL}. Using default plotting styles. Error: {e}",
+        UserWarning,
+    )
+except json.JSONDecodeError as e:
+    warnings.warn(
+        f"Could not decode settings JSON from {_SETTINGS_URL}. Using default plotting styles. Error: {e}",
+        UserWarning,
+    )
+except Exception as e:  # Catch any other unexpected errors during setup
+    warnings.warn(
+        f"An unexpected error occurred during settings setup: {e}. Using default plotting styles.",
+        UserWarning,
+    )
 
-sns_dict = settings_dict["sns_dict"]
-sns.set_theme(**sns_dict)
 
-SCALE_FACTOR = 0.5  # scale factor for wavelength del to check wavelength range
-HANDCRAFTED_WL_MIN = 999  # angstrom
-HANDCRAFTED_WL_MAX = 15_000  # angstrom
+# --- Physics/Astro Constants ---
 
-# Thresholds for flux positivity checks
-MIN_POSITIVE_FLUX_FRACTION = 0.80  # For general positivity check in check_flux_positive
-MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK = (
-    0.75  # For unit plausibility check in check_flux_units_erg_cm2_s_ang
+# Wavelength Validation
+SCALE_FACTOR = 0.5  # Tolerance factor for wavelength range checks (relative to spectral resolution del_lambda)
+HANDCRAFTED_WL_MIN = 999  # Minimum plausible optical/NIR wavelength observed (Angstrom)
+HANDCRAFTED_WL_MAX = (
+    15_000  # Maximum plausible optical/NIR wavelength observed (Angstrom)
 )
 
-# Plausible flux range for erg cm-2 s-1 Å-1 unit check
-FLUX_UNIT_CHECK_MIN_MAG = 1e-18
-FLUX_UNIT_CHECK_MAX_MAG = 1e-10
+# Flux Validation
+MIN_POSITIVE_FLUX_FRACTION = (
+    0.80  # Required fraction of positive flux points for general validation
+)
+MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK = (
+    0.75  # Required fraction for flux unit plausibility check
+)
+FLUX_UNIT_CHECK_MIN_MAG = 1e-18  # Plausible minimum flux magnitude (erg cm-2 s-1 Å-1)
+FLUX_UNIT_CHECK_MAX_MAG = 1e-10  # Plausible maximum flux magnitude (erg cm-2 s-1 Å-1)
 
-# Define common column names (lowercase) for robust identification
-# Prioritized order - more specific names first
+
+# --- Column Name Identification ---
+# Define common column names (lowercase) for robust identification across various file formats.
+# The lists are ordered by likely prevalence or specificity.
+
 WAVELENGTH_COLUMN_NAMES = [
-    "wavelength",
-    "#wavelength",
-    "wavelen",
-    "wavelength_angstrom",
-    "lambda_aa",
-    "wavelength(aa)",
-    "wavelength(angstroms)",
-    "wavelength (å)",
-    "wl[å]",
-    "wave",
-    "wav",
-    "wl",
-    "lambda",
-    "lam",
-    "wave-obs",
-    "waveobs",
-    "obswave",
-    "air_wave",
-    "vacuum_wave",
-    "wavelength(um)",
+    name.lower()
+    for name in [
+        "wavelength",
+        "#wavelength",
+        "wavelen",
+        "wavelength_angstrom",
+        "lambda_aa",
+        "wavelength(aa)",
+        "wavelength(angstroms)",
+        "wavelength (å)",
+        "wl[å]",
+        "wl[\aa]",
+        "wave",
+        "wav",
+        "wl",
+        "lambda",
+        "lam",
+        "wave-obs",
+        "waveobs",
+        "obswave",
+        "air_wave",
+        "vacuum_wave",
+        "wavelength(um)",
+        "angstrom	10^-18",
+        "wl(a)",
+        "aa",
+    ]
 ]
 
 FLUX_COLUMN_NAMES = [
-    "flux",
-    "flux_density",
-    "flam",
-    "flambda",
-    "f_lam",
-    "intensity",
-    "flux(flam)",
-    "flux (erg/s/cm2/å)",
-    "flux[μjy]",
-    "normalized_flux",
-    "absflux",
-    "flux_tell_corrected",
-    "flux_not_tell_corrected",
-    "flux_smoothed",
-    "spec_sum",
-    "spec_optimal",
-    "response",
+    name.lower()
+    for name in [
+        "flux",
+        "flux_density",
+        "flam",
+        "flambda",
+        "f_lam",
+        "intensity",
+        "flux(flam)",
+        "flux(mjy)",
+        "flux (erg/s/cm2/å)",
+        "flux[μjy]",
+        "flux(10-15)",
+        "normalized_flux",
+        "erg/s/cm^2/angstrom",
+        "absflux",
+        "flux_cgs_aa",
+        "flux_tell_corrected",
+        "flux_not_tell_corrected",
+        "flux_smoothed",
+        "spec_sum",
+        "spec_optimal",
+        "response",
+        "absflux(10^-16ergcm^-2s^-1(aa)^-1)",
+        "absflux(10^-14ergcm^-2s^-1(aa)^-1)",
+        "flux_egs",
+    ]
 ]
 
-# Functions to read spectra files
+
+# ==============================================================================
+# ==                          CORE HELPER FUNCTIONS                           ==
+# ==============================================================================
 
 
-def ignore_equals_END_lines(filepath):
+def _find_spectral_columns(df):
     """
-    Custom reader for spectrum files that ignores lines containing '=' and lines starting with 'END'.
+    Identify wavelength and flux columns in a spectrum DataFrame.
 
-    This function is used as a fallback when standard astropy readers fail due to formatting issues
-    in spectrum files. It filters out lines that typically cause parsing problems, such as header
-    lines with key-value pairs (containing '=') and footer lines (starting with 'END').
+    Tries to match column names against predefined lists (case-insensitive).
+    If names aren't found, it attempts to use the first two columns (index 0 for
+    wavelength, index 1 for flux) as a fallback, issuing a warning.
 
-    Parameters:
-    -----------
-    filepath : str
-        Path to the spectrum file
+    This heuristic approach is needed due to the variety of naming conventions
+    found in astronomical data files.
 
-    Returns:
-    --------
-    astropy.table.Table
-        Table containing the cleaned spectrum data
+    Raises specific ValueErrors (Error 1.x) if columns cannot be uniquely
+    identified by name or the positional fallback is not possible (e.g.,
+    only one column exists).
     """
-    with open(filepath, "r") as f:
-        lines = [
-            line for line in f if "=" not in line and not line.strip().startswith("END")
-        ]
-    table = ascii.read("\n".join(lines))
-    return table
+    original_columns = df.columns
+    lower_columns = [str(col).lower() for col in original_columns]
+    wavelength_col_name = None
+    flux_col_name = None
 
+    # --- Step 1: Attempt to find wavelength column by name ---
+    for name in WAVELENGTH_COLUMN_NAMES:
+        try:
+            idx = lower_columns.index(name)
+            wavelength_col_name = original_columns[idx]
+            break  # Found a match, stop searching
+        except ValueError:
+            continue  # Name not in list, try next one
 
-def ignore_keypair_value_lines(filepath):
-    """
-    Custom reader for spectrum files that removes all lines containing key:value pairs before reading it.
-    However, this is only done after a check - the first two lines MUST contain JD and RA values
-    (based on tests as of 2025-04-08).
+    # --- Step 2: Attempt to find flux column by name ---
+    for name in FLUX_COLUMN_NAMES:
+        try:
+            idx = lower_columns.index(name)
+            # Crucially, ensure we didn't identify the *same* column as wavelength
+            if original_columns[idx] != wavelength_col_name:
+                flux_col_name = original_columns[idx]
+                break  # Found a different match, stop searching
+            # If it IS the same column, continue searching other flux names
+        except ValueError:
+            continue  # Name not in list, try next one
 
-    Parameters:
-    -----------
-    filepath : str
-        Path to the spectrum file
+    # --- Step 3: Handle identification results and apply fallbacks ---
+    if wavelength_col_name and flux_col_name:
+        # Best case: Successfully identified both by name
+        return wavelength_col_name, flux_col_name
 
-    Returns:
-    --------
-    astropy.table.Table
-        Table containing the cleaned spectrum data
-    """
-    with open(filepath, "r") as f:
-        all_lines = f.readlines()
+    elif wavelength_col_name and not flux_col_name:
+        # Found wavelength by name, attempt positional fallback for flux
+        if df.shape[1] > 1:
+            wl_col_idx = df.columns.get_loc(wavelength_col_name)
+            # Try the 'other' column (index 0 or 1)
+            flux_col_idx = 1 if wl_col_idx == 0 else 0
+            if flux_col_idx < len(original_columns):  # Check index is valid
+                flux_col_name = original_columns[flux_col_idx]
+                warnings.warn(
+                    f"Wavelength column '{wavelength_col_name}' found by name, but flux column not found. "
+                    f"Falling back to positional column '{flux_col_name}' (index {flux_col_idx}) for flux.",
+                    UserWarning,
+                )
+                return wavelength_col_name, flux_col_name
+            else:
+                # This case is rare unless df has only 1 column which was identified as wavelength
+                raise ValueError(
+                    f"Error 1.1 (_find_spectral_columns): Found wavelength '{wavelength_col_name}', "
+                    f"but cannot determine flux column positionally (invalid index {flux_col_idx})."
+                )
+        else:  # Only one column total
+            raise ValueError(
+                f"Error 1.2 (_find_spectral_columns): Found wavelength column '{wavelength_col_name}' by name, "
+                f"but cannot determine flux column positionally (only {df.shape[1]} column)."
+            )
 
-    # Check if first two lines match the required format
-    if (
-        len(all_lines) >= 2
-        and all_lines[0].strip().startswith("JD:")
-        and all_lines[1].strip().startswith("RA:")
-    ):
-        lines = [line for line in all_lines if ":" not in line]
+    elif not wavelength_col_name and flux_col_name:
+        # Found flux by name, attempt positional fallback for wavelength
+        if df.shape[1] > 1:
+            flux_col_idx = df.columns.get_loc(flux_col_name)
+            # Try the 'other' column (index 0 or 1)
+            wl_col_idx = 0 if flux_col_idx == 1 else 1
+            if wl_col_idx < len(original_columns):  # Check index is valid
+                wavelength_col_name = original_columns[wl_col_idx]
+                warnings.warn(
+                    f"Flux column '{flux_col_name}' found by name, but wavelength column not found. "
+                    f"Falling back to positional column '{wavelength_col_name}' (index {wl_col_idx}) for wavelength.",
+                    UserWarning,
+                )
+                return wavelength_col_name, flux_col_name
+            else:
+                # This case is rare unless df has only 1 column which was identified as flux
+                raise ValueError(
+                    f"Error 1.3 (_find_spectral_columns): Found flux '{flux_col_name}', "
+                    f"but cannot determine wavelength column positionally (invalid index {wl_col_idx})."
+                )
+        else:  # Only one column total
+            raise ValueError(
+                f"Error 1.4 (_find_spectral_columns): Found flux column '{flux_col_name}' by name, "
+                f"but cannot determine wavelength column positionally (only {df.shape[1]} column)."
+            )
+
     else:
-        lines = all_lines
+        # --- Step 4: Full Positional Fallback (Neither found by name) ---
+        if df.shape[1] >= 2:
+            wavelength_col_name = original_columns[0]
+            flux_col_name = original_columns[1]
+            warnings.warn(
+                f"Could not identify wavelength or flux columns by name. "
+                f"Falling back to positional columns: index 0 ('{wavelength_col_name}') for wavelength, "
+                f"index 1 ('{flux_col_name}') for flux.",
+                UserWarning,
+            )
+            return wavelength_col_name, flux_col_name
+        else:  # Less than 2 columns, cannot fallback
+            raise ValueError(
+                f"Error 1.5 (_find_spectral_columns): Could not identify wavelength/flux columns by name, "
+                f"and only {df.shape[1]} column(s) available for positional fallback."
+            )
 
-    table = ascii.read("\n".join(lines))
-    return table
+
+# ==============================================================================
+# ==                         SPECTRA FILE READERS                             ==
+# ==============================================================================
+
+# --- Custom Reader Functions (for problematic file formats) ---
+
+
+def _ignore_equals_END_lines(filepath):
+    """
+    Custom reader: Ignores lines containing '=' or starting with 'END'.
+
+    Handles common non-standard formats where header/footer lines break standard parsers.
+    """
+    try:
+        with open(filepath, "r") as f:
+            lines = [
+                line
+                for line in f
+                if "=" not in line and not line.strip().upper().startswith("END")
+            ]
+        # Use astropy.ascii for robust table parsing after filtering
+        table = ascii.read("\n".join(lines))
+        return table
+    except Exception as e:
+        # Add context to the error before it's caught by read_spectra
+        raise type(e)(f"Error in _ignore_equals_END_lines for {filepath}: {e}") from e
+
+
+def _ignore_keypair_value_lines(filepath):
+    """
+    Custom reader: Removes lines with 'key: value' pairs if header matches pattern.
+
+    Specifically targets a format observed where the first two lines are 'JD:' and 'RA:',
+    followed by data, potentially interrupted by other 'key: value' lines.
+    """
+    try:
+        with open(filepath, "r") as f:
+            all_lines = f.readlines()
+
+        # Check if first two lines match the expected header pattern
+        if (
+            len(all_lines) >= 2
+            and all_lines[0].strip().upper().startswith("JD:")
+            and all_lines[1].strip().upper().startswith("RA:")
+        ):
+            # Filter out any line containing a colon if pattern matches
+            lines = [line for line in all_lines if ":" not in line]
+        else:
+            # If pattern doesn't match, process all lines (standard astropy might handle it)
+            lines = all_lines
+
+        table = ascii.read("\n".join(lines))
+        return table
+    except Exception as e:
+        # Add context to the error
+        raise type(e)(
+            f"Error in _ignore_keypair_value_lines for {filepath}: {e}"
+        ) from e
+
+
+# --- Main Spectrum Reading Function ---
 
 
 def read_spectra(filepath):
     """
-    Read a spectrum file and return a pandas DataFrame.
+    Read a spectrum file using multiple strategies and return a pandas DataFrame.
 
-    Tries multiple reader functions in sequence until one succeeds.
-
-    Parameters:
-    -----------
-    filepath : str
-        Path to the spectrum file
-
-    Returns:
-    --------
-    pandas.DataFrame
-        DataFrame containing the spectrum data
-
-    Notes:
-    ------
-    If the standard astropy reader fails, it falls back to a custom reader that
-    ignores lines containing '=' and lines starting with 'END', which can cause
-    parsing issues in some spectrum formats.
+    Attempts reading with standard `astropy.io.ascii.read` first. If that fails,
+    it tries custom reader functions (`_ignore_equals_END_lines`, `_ignore_keypair_value_lines`)
+    designed to handle specific non-standard formatting issues observed in real data.
 
     Raises:
-    -------
-    ValueError
-        If all reader functions fail
-
+        ValueError (Error 2.1): If a reader returns an unexpected data type (not astropy Table or pandas DataFrame).
+        ValueError (Error 2.2): If all attempted reading methods fail, summarizing the errors from each attempt.
+        FileNotFoundError: If the input `filepath` does not exist.
+        Other exceptions from underlying readers (e.g., `astropy.io.ascii.InconsistentTableError`).
     """
-    # List of reader functions to try in order
-    reader_functions = [ascii.read, ignore_equals_END_lines, ignore_keypair_value_lines]
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Spectrum file not found: {filepath}")
 
-    errors = []
+    # List of reader functions to try, in order of preference
+    # Standard reader first, then custom workarounds
+    reader_functions = [
+        ascii.read,
+        _ignore_equals_END_lines,
+        _ignore_keypair_value_lines,
+    ]
+
+    errors = []  # Keep track of errors from each failed reader
 
     for reader_func in reader_functions:
         try:
-            df = reader_func(filepath).to_pandas()
+            table = reader_func(filepath)
+
+            # Ensure the output is a pandas DataFrame
+            if isinstance(table, astropy.table.Table):
+                df = table.to_pandas()
+            elif isinstance(table, pd.DataFrame):
+                df = table  # Already a DataFrame
+            else:
+                # This case should be rare with the current readers
+                raise ValueError(
+                    f"Error 2.1 (read_spectra): Reader {reader_func.__name__} returned unexpected type {type(table)} for file {filepath}"
+                )
+
+            # Success! Return the DataFrame
             return df
+
         except Exception as e:
-            errors.append(f"{reader_func.__name__}: {str(e)}")
+            # Record the error and try the next reader
+            errors.append(f"  - {reader_func.__name__}: {type(e).__name__}({str(e)})")
             continue
 
-    # If we get here, all readers failed
-    error_msg = "All spectrum readers failed:\n" + "\n".join(errors)
-    raise ValueError(error_msg)
+    # If we reach here, all readers failed
+    error_summary = "\n".join(errors)
+    raise ValueError(
+        f"Error 2.2 (read_spectra): All spectrum readers failed for file '{os.path.basename(filepath)}'. Errors encountered:\n{error_summary}"
+    )
 
 
-# Functions for checks on spectra read
+# ==============================================================================
+# ==                      DATA VALIDATION FUNCTIONS                           ==
+# ==============================================================================
+
+# --- Basic Array Checks ---
 
 
 def check_wavelength_increasing(wavelengths):
     """
-    Check if wavelength values are monotonically increasing.
-
-    Parameters:
-    -----------
-    wavelengths : numpy.ndarray
-        1D array of wavelength values
-
-    Returns:
-    --------
-    bool
-        True if wavelengths are monotonically increasing, False otherwise
+    Check if wavelength values are strictly monotonically increasing.
+    Handles single-point spectra correctly.
     """
-    is_increasing = np.all(np.diff(wavelengths) > 0)
-    return is_increasing
+    # Edge case: A single point is trivially monotonic
+    if len(wavelengths) <= 1:
+        return True
+    # Check if all differences are positive
+    return np.all(np.diff(wavelengths) > 0)
 
 
 def check_flux_positive(flux, frac_positive=MIN_POSITIVE_FLUX_FRACTION):
     """
     Check if a sufficient fraction of flux values are positive.
 
-    Parameters:
-    -----------
-    flux : numpy.ndarray
-        1D array of flux values
-    frac_positive : float, default=MIN_POSITIVE_FLUX_FRACTION
-        Minimum fraction of positive flux values required
-
-    Returns:
-    --------
-    bool
-        True if the fraction of positive flux values exceeds the threshold,
-        False otherwise
+    Helps distinguish real signal from noise centered around zero, or spectra
+    with excessive negative regions (e.g., due to over-subtraction). Ignores NaNs.
     """
-    is_positive = np.sum(flux > 0) / len(flux) > frac_positive
-    return is_positive
+    if flux is None or len(flux) == 0:
+        return False  # Cannot check empty array
+
+    # Calculate fraction of positive points, ignoring NaNs
+    with warnings.catch_warnings():  # Suppress RuntimeWarning for all-NaN slices
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        positive_fraction = np.nanmean(flux > 0)
+
+    if np.isnan(positive_fraction):  # Handle case where all flux values are NaN
+        return False
+
+    return positive_fraction > frac_positive
 
 
 def check_flux_units_erg_cm2_s_ang(
     flux, frac_positive_threshold=MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK
 ):
     """
-    Checks if unlabeled flux values are plausibly in units of
-    'erg cm(-2) sec(-1) Ang(-1)' based on a magnitude range
-    and basic signal properties.
+    Check if flux values are plausibly in 'erg cm-2 s-1 Å-1'.
 
-    Astronomical sources commonly observed in optical/NIR spectra have flux densities
-    in these units typically falling between roughly FLUX_UNIT_CHECK_MIN_MAG
-    and FLUX_UNIT_CHECK_MAX_MAG. This check verifies if the median absolute flux
-    falls within this plausible range.
-    It also requires a minimum fraction of flux values to be positive, helping
-    to distinguish signal from pure noise centered on zero.
+    Uses heuristic checks based on typical astronomical flux magnitudes in these
+    units and requires a minimum fraction of positive flux values. Ignores NaNs.
 
-    Parameters:
-    -----------
-    flux : numpy.ndarray
-        Flux values to check. Assumed to be cleaned of NaNs if necessary.
-    frac_positive_threshold : float, optional, default=MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK
-        Minimum fraction of positive flux values required.
-    Returns:
-    --------
-    bool
-        True if flux values fall within the expected range and meet the
-        positive fraction criterion, suggesting plausible units, False otherwise.
-
-    Notes:
-    ------
-    This is a heuristic check based on typical values. It cannot definitively
-    confirm the units but serves as a useful filter against grossly miscalibrated
-    data or data in vastly different unit systems (e.g., counts, relative flux).
-    Requires wavelength checks to be performed separately.
+    This is useful when metadata is missing or ambiguous ('Other').
     """
     if flux is None or len(flux) == 0:
-        return False  # Cannot check empty flux array
+        return False
 
-    # Check 1: Typical magnitude range for erg cm-2 s-1 Å-1
-    # Use nanmedian to be robust against potential NaNs
+    # --- Check 1: Plausible Magnitude Range ---
+    # Use nanmedian for robustness against outliers and NaNs
     median_abs_flux = np.nanmedian(np.abs(flux))
-    # Check if median_abs_flux is NaN (can happen if all flux values are NaN)
-    if np.isnan(median_abs_flux):
+    if np.isnan(median_abs_flux):  # Handle case where all flux values are NaN
         return False
+    is_in_range = FLUX_UNIT_CHECK_MIN_MAG < median_abs_flux < FLUX_UNIT_CHECK_MAX_MAG
 
-    is_in_range = (median_abs_flux > FLUX_UNIT_CHECK_MIN_MAG) and (
-        median_abs_flux < FLUX_UNIT_CHECK_MAX_MAG
+    # --- Check 2: Sufficient Positive Signal ---
+    # Check if enough points are positive (using the dedicated function)
+    is_sufficiently_positive = check_flux_positive(
+        flux, frac_positive=frac_positive_threshold
     )
-
-    # Check 2: Ensure it's not just noise around zero (sufficient positive values)
-    # Use nanmean to ignore NaNs when calculating the fraction
-    positive_fraction = np.nanmean(flux > 0)
-    # Check if positive_fraction is NaN (can happen if all flux values are NaN)
-    if np.isnan(positive_fraction):
-        return False
-
-    is_sufficiently_positive = positive_fraction > frac_positive_threshold
 
     return is_in_range and is_sufficiently_positive
 
 
+# --- Comprehensive Spectrum Validation ---
+
+
 def check_spectrafile(df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda):
     """
-    Validates a spectrum dataframe against expected parameters and extracts wavelength and flux data.
+    Validate spectrum DataFrame content against metadata and physical expectations.
 
-    This function performs several validation checks on the input spectrum dataframe:
-    1. Verifies the number of rows matches the expected count based on wavelength range and step size (Error #1)
-    2. Identifies wavelength and flux columns, first by searching for common names (case-insensitive),
-       then falling back to positional indexing (columns 0 and 1). Raises errors if columns cannot be
-       uniquely identified or if positional fallback is needed but insufficient columns exist (Errors #2a, #2b).
-    3. Extracts the identified wavelength and flux data.
-    4. Delegates to check_wavelengthflux() for detailed validation of the extracted data:
-       - 4.1. Wavelength range boundaries (Errors #3, #4)
-       - 4.2. Monotonically increasing wavelengths (Error #5)
-       - 4.3. Wavelength unit conversion if needed (Error #6)
-       - 4.4. Wavelength values within allowed physical limits (Errors #7, #8)
-       - 4.5. Flux units validation (Errors #9, #10)
-       - 4.6. Flux mostly positive (Error #11)
+    Performs checks on row count, identifies columns, extracts data, and delegates
+    detailed array checks to `check_wavelengthflux`.
 
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        Dataframe containing spectrum data with wavelength in first column and flux in second
-    wl_unit : str
-        Unit of wavelength values (e.g., 'Angstrom', 'Micrometre', 'nm')
-    spec_unit : str
-        Unit of flux values (e.g., 'erg cm(-2) sec(-1) Ang(-1)', 'Other')
-    lambda_min : float
-        Expected minimum wavelength value
-    lambda_max : float
-        Expected maximum wavelength value
-    del_lambda : float
-        Expected wavelength step size
-
-    Returns:
-    --------
-    tuple[str, str]
-        Returns a tuple containing the identified wavelength column name and flux column name.
-        Function raises ValueError or NotImplementedError if validation fails or columns cannot be identified.
-
-    Raises:
-    -------
-    ValueError
-        If number of rows doesn't match expected count (Error #1)
-        If wavelength/flux columns are identified as the same name (Error #2a)
-        If columns aren't found by name and DataFrame has < 2 columns for positional fallback (Error #2b)
-        If data validation in check_wavelengthflux fails (Errors #3-#5, #7, #8, #11, #12-#15)
-    NotImplementedError
-        If unit conversions are not implemented in check_wavelengthflux (Errors #6, #9, #10)
+    Raises specific ValueErrors or NotImplementedErrors for failures.
+    Returns identified wavelength and flux column names on success.
     """
-    # 1. Check if number of rows matches expected count based on wavelength range
-    n_samples = int((lambda_max - lambda_min) // del_lambda)
-    if df.shape[0] not in [n_samples, n_samples + 1]:
+    # --- Check 1: Validate Input Parameters ---
+    if del_lambda <= 0:
         raise ValueError(
-            f"Error #1 (check_spectrafile): Expected {n_samples} or {n_samples + 1} rows based on wavelength range, but got {df.shape[0]}"
+            "Error 3.1 (check_spectrafile): Del-Lambda (spectral resolution) must be positive."
         )
 
-    # # OLD
-    # # 2. Check if dataframe has a supported number of columns (2, 3,
-    # or 4)
-    # if df.shape[1] in [2, 3, 4]:
-    #     # 3. Extract wavelength and flux data from the first two
-    #     columns
-    #     wavelength, flux = df.iloc[:, 0].to_numpy(), df.iloc[:, 1].
-    #     to_numpy()
-    # else:
-    #     raise NotImplementedError(
-    #         f"Error #2 (check_spectrafile): Processing for dataframes
-    #         with {df.shape[1]} columns is not supported yet"
-    #     )
+    # --- Check 2: Validate Row Count ---
+    # Expected number of data points based on wavelength range and resolution
+    # Using np.floor provides robustness against minor floating point inaccuracies
+    n_samples_expected = int(np.floor((lambda_max - lambda_min) / del_lambda))
+    # Allow for off-by-one differences due to endpoint inclusion/exclusion or rounding
+    expected_rows_low = max(0, n_samples_expected)  # Ensure lower bound is non-negative
+    expected_rows_high = n_samples_expected + 1
+    if not (expected_rows_low <= df.shape[0] <= expected_rows_high):
+        raise ValueError(
+            f"Error 4.1 (check_spectrafile): Unexpected number of rows. "
+            f"Expected ~{n_samples_expected} (range {expected_rows_low}-{expected_rows_high}) based on "
+            f"λ_min={lambda_min}, λ_max={lambda_max}, Δλ={del_lambda}. Found {df.shape[0]} rows."
+        )
 
-    # 2. Identify wavelength and flux columns
-    original_columns = df.columns
-    lower_columns = [str(col).lower() for col in original_columns]
-    wavelength_col_name = None
-    flux_col_name = None
+    # --- Check 3: Identify Wavelength and Flux Columns ---
+    try:
+        wavelength_col_name, flux_col_name = _find_spectral_columns(df)
+    except ValueError as e:
+        # Re-raise the specific error (1.x) from the helper function, adding context
+        raise ValueError(
+            f"Error 5.1 (check_spectrafile): Failed to identify spectral columns. Original error: {e}"
+        ) from e  # Preserve original traceback
 
-    # Find wavelength column by name
-    for name in WAVELENGTH_COLUMN_NAMES:
-        try:
-            idx = lower_columns.index(name)
-            wavelength_col_name = original_columns[idx]
-            break
-        except ValueError:
-            continue
+    # --- Check 4: Extract and Convert Data ---
+    try:
+        # Attempt conversion to float numpy arrays immediately for early type checking
+        wavelength = df[wavelength_col_name].to_numpy(dtype=float)
+        flux = df[flux_col_name].to_numpy(dtype=float)
+    except KeyError as e:
+        # Should be rare if _find_spectral_columns worked, but catch defensively
+        raise ValueError(
+            f"Error 6.1 (check_spectrafile): Identified column name '{e}' not found in DataFrame index {df.columns}."
+        )
+    except (ValueError, TypeError) as e:
+        # Catch errors if data in columns cannot be cast to float
+        raise ValueError(
+            f"Error 6.2 (check_spectrafile): Failed to convert column data to numeric type. "
+            f"Check columns '{wavelength_col_name}' and '{flux_col_name}' for non-numeric values. Original error: {type(e).__name__}({e})"
+        )
 
-    # Find flux column by name
-    for name in FLUX_COLUMN_NAMES:
-        try:
-            idx = lower_columns.index(name)
-            # Ensure it's not the same column as wavelength
-            if original_columns[idx] != wavelength_col_name:
-                flux_col_name = original_columns[idx]
-                break
-            # If it IS the same column, continue searching for other flux names
-        except ValueError:
-            continue
-
-    # 3. Extract wavelength and flux data based on identification
-    if wavelength_col_name and flux_col_name:
-        # Found both by name
-        wavelength = df[wavelength_col_name].to_numpy()
-        flux = df[flux_col_name].to_numpy()
-    elif wavelength_col_name and not flux_col_name:
-        # Found wavelength by name, try positional for flux (if >1 column exists)
-        if df.shape[1] > 1:
-            # Try second column by position, assuming it's not the identified wavelength col
-            potential_flux_idx = (
-                1 if df.columns.get_loc(wavelength_col_name) == 0 else 0
-            )
-            flux_col_name = original_columns[potential_flux_idx]
-            warnings.warn(
-                f"Wavelength column '{wavelength_col_name}' found by name, but flux column not found. "
-                f"Falling back to positional column '{flux_col_name}' (index {potential_flux_idx}) for flux.",
-                UserWarning,
-            )
-            wavelength = df[wavelength_col_name].to_numpy()
-            flux = df[flux_col_name].to_numpy()
-            # Optional: Add a warning here about fallback for flux?
-        else:
-            raise ValueError(
-                f"Error #2b (check_spectrafile): Found wavelength column '{wavelength_col_name}' by name, but cannot determine flux column positionally (only {df.shape[1]} column)"
-            )
-
-    elif not wavelength_col_name and flux_col_name:
-        # Found flux by name, try positional for wavelength (if >1 column exists)
-        if df.shape[1] > 1:
-            # Try first column by position, assuming it's not the identified flux col
-            potential_wl_idx = 0 if df.columns.get_loc(flux_col_name) == 1 else 1
-            wavelength_col_name = original_columns[potential_wl_idx]
-            warnings.warn(
-                f"Flux column '{flux_col_name}' found by name, but wavelength column not found. "
-                f"Falling back to positional column '{wavelength_col_name}' (index {potential_wl_idx}) for wavelength.",
-                UserWarning,
-            )
-            wavelength = df[wavelength_col_name].to_numpy()
-            flux = df[flux_col_name].to_numpy()
-            # Optional: Add a warning here about fallback for wavelength?
-        else:
-            raise ValueError(
-                f"Error #2b (check_spectrafile): Found flux column '{flux_col_name}' by name, but cannot determine wavelength column positionally (only {df.shape[1]} column)"
-            )
-    else:
-        # Fallback to positional if neither found by name (and at least 2 columns exist)
-        if df.shape[1] >= 2:
-            wavelength = df.iloc[:, 0].to_numpy()
-            flux = df.iloc[:, 1].to_numpy()
-            warnings.warn(
-                f"Could not identify wavelength or flux columns by name. "
-                f"Falling back to positional columns: index 0 ('{df.columns[0]}') for wavelength, index 1 ('{df.columns[1]}') for flux.",
-                UserWarning,
-            )
-            # Optional: Add a warning here about positional fallback?
-        else:
-            raise ValueError(
-                f"Error #2b (check_spectrafile): Could not identify wavelength/flux columns by name, and only {df.shape[1]} column(s) available for positional fallback."
-            )
-
-    # 4. Delegate to check_wavelengthflux() for additional validation
-    # 4.1. Check wavelength range boundaries
-    # 4.2. Check wavelength is monotonically increasing
-    # 4.3. Check and convert wavelength units if needed
-    # 4.4. Verify wavelength values are within allowed physical limits
-    # 4.5. Validate flux units
-    # 4.6. Check if flux is mostly positive
+    # --- Check 5: Perform Detailed Wavelength and Flux Array Validation ---
+    # This function performs checks for NaNs, units, range, monotonicity etc.
+    # It raises specific errors (7.x - 12.x) upon failure.
     check_wavelengthflux(
         wavelength, flux, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
     )
 
+    # --- Success ---
+    # Return the validated column names for potential use (e.g., plotting)
     return wavelength_col_name, flux_col_name
 
 
@@ -461,131 +537,152 @@ def check_wavelengthflux(
     wavelength, flux, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
 ):
     """
-    Performs detailed validation checks on wavelength and flux arrays extracted from a spectrum.
+    Perform detailed checks on extracted wavelength and flux numpy arrays.
 
-    Called by check_spectrafile().
+    Validates against NaN/Inf values, handles wavelength unit conversion (if needed),
+    checks wavelength range and monotonicity, assesses physical plausibility,
+    validates flux units (including heuristic checks for 'Other'), and checks
+    for sufficient positive flux signal.
 
-    Checks performed:
-    1. Wavelength range matches expected min/max within tolerance (Errors #3, #4)
-    2. Wavelength values are monotonically increasing (Error #5)
-    3. Wavelength units are 'Angstrom' or convertible ('Micrometre', 'nm') (Error #6)
-    4. Wavelength values are within physically plausible limits (HANDCRAFTED_WL_MIN/MAX) (Errors #7, #8)
-    5. Flux units are 'erg cm(-2) sec(-1) Ang(-1)' or 'Other' (with validation) (Errors #9, #10)
-    6. Flux values are sufficiently positive (Error #11)
-
-    Parameters:
-    -----------
-    wavelength : numpy.ndarray
-        1D array of wavelength values
-    flux : numpy.ndarray
-        1D array of flux values
-    wl_unit : str
-        Unit of wavelength values (e.g., 'Angstrom', 'Micrometre', 'nm')
-    spec_unit : str
-        Unit of flux values (e.g., 'erg cm(-2) sec(-1) Ang(-1)', 'Other')
-    lambda_min : float
-        Expected minimum wavelength value
-    lambda_max : float
-        Expected maximum wavelength value
-    del_lambda : float
-        Expected wavelength step size
-
-    Returns:
-    --------
-    None
-        Function raises ValueError or NotImplementedError if validation fails
-
-    Raises:
-    -------
-    ValueError
-        If wavelength range is incorrect (Errors #3, #4)
-        If wavelengths are not monotonic (Error #5)
-        If wavelengths are outside physical limits (Errors #7, #8)
-        If flux is not sufficiently positive (Error #11)
-        If wavelength or flux contain NaN or Inf values (Errors #12, #13, #14, #15)
-    NotImplementedError
-        If wavelength unit conversion is not supported (Error #6)
-        If flux units are 'Other' but invalid, or conversion not supported (Errors #9, #10)
+    Called internally by `check_spectrafile`. Raises specific errors (7.x - 12.x).
     """
-    # 0. Check for NaN/Inf values
+    # --- Check 0: Basic Data Integrity (NaN/Inf) ---
+    # These checks are crucial before performing numerical operations.
     if np.isnan(wavelength).any():
         raise ValueError(
-            "Error #12 (check_wavelengthflux): Wavelength array contains NaN values"
+            "Error 7.1 (check_wavelengthflux): Wavelength array contains NaN values."
         )
     if np.isinf(wavelength).any():
         raise ValueError(
-            "Error #13 (check_wavelengthflux): Wavelength array contains Inf values"
+            "Error 7.2 (check_wavelengthflux): Wavelength array contains Inf values."
         )
     if np.isnan(flux).any():
+        # Note: Depending on analysis, some NaNs in flux might be acceptable.
+        # For now, we treat them as errors to ensure clean data for basic checks.
+        # Consider refining this if specific NaN handling is required later.
+        # warnings.warn(
+        #     "Flux array contains NaN values. Treating as error for now.", UserWarning
+        # )
         raise ValueError(
-            "Error #14 (check_wavelengthflux): Flux array contains NaN values"
+            "Error 7.3 (check_wavelengthflux): Flux array contains NaN values."
         )
     if np.isinf(flux).any():
         raise ValueError(
-            "Error #15 (check_wavelengthflux): Flux array contains Inf values"
+            "Error 7.4 (check_wavelengthflux): Flux array contains Inf values."
         )
 
-    # 1. Check if wavelength range is correct
-    if abs(wavelength[0] - lambda_min) > SCALE_FACTOR * del_lambda:
-        raise ValueError(
-            f"Error #3 (check_wavelengthflux): First wavelength {wavelength[0]} doesn't match expected lambda_min {lambda_min} within tolerance {SCALE_FACTOR * del_lambda}"
-        )
-
-    if abs(wavelength[-1] - lambda_max) > SCALE_FACTOR * del_lambda:
-        raise ValueError(
-            f"Error #4 (check_wavelengthflux): Last wavelength {wavelength[-1]} doesn't match expected lambda_max {lambda_max} within tolerance {SCALE_FACTOR * del_lambda}"
-        )
-
-    # 2. Check if wavelength is monotonically increasing
-    if not check_wavelength_increasing(wavelength):
-        raise ValueError(
-            "Error #5 (check_wavelengthflux): Wavelengths are not monotonically increasing"
-        )
-
-    # 3. Check wavelength units are in angstrom and if not, convert
+    # --- Check 1: Wavelength Unit Conversion (if necessary) ---
+    # Ensure wavelength is in Angstroms for consistent range checks.
+    # Use a copy to avoid modifying the original array passed to the function.
+    wl_angstrom = np.copy(wavelength)
     if wl_unit != "Angstrom":
-        if wl_unit == "Micrometre":
-            wavelength = wavelength * 10_000  # convert to angstrom
-        elif wl_unit == "nm":  # Fixed syntax error
-            wavelength = wavelength * 10  # convert to angstrom
+        if wl_unit == "Micrometre" or wl_unit == "um":
+            wl_angstrom *= 10_000  # Convert microns to Angstroms
+            # warnings.warn(
+            #     f"Converted wavelength from {wl_unit} to Angstrom.", UserWarning
+            # )
+        elif wl_unit == "nm":
+            wl_angstrom *= 10  # Convert nm to Angstroms
+            # warnings.warn(
+            #     f"Converted wavelength from {wl_unit} to Angstrom.", UserWarning
+            # )
         else:
+            # If unit is unknown and not Angstrom, cannot proceed reliably
             raise NotImplementedError(
-                f"Error #6 (check_wavelengthflux): Wavelength unit conversion from '{wl_unit}' to Angstrom not implemented"
+                f"Error 8.1 (check_wavelengthflux): Wavelength unit conversion from '{wl_unit}' to Angstrom not implemented."
             )
 
-    # 4. Check wavelength is in a range that make sense
-    if wavelength[0] < HANDCRAFTED_WL_MIN:
+    # --- Check 2: Wavelength Range Verification (against metadata) ---
+    # Use np.isclose for robust floating-point comparison.
+    # Tolerance is scaled by spectral resolution (del_lambda).
+    tolerance = SCALE_FACTOR * del_lambda
+    if not np.isclose(wl_angstrom[0], lambda_min, atol=tolerance):
         raise ValueError(
-            f"Error #7 (check_wavelengthflux): First wavelength {wavelength[0]} is below minimum allowed value {HANDCRAFTED_WL_MIN}"
+            f"Error 9.1 (check_wavelengthflux): First wavelength {wl_angstrom[0]:.2f} Å "
+            f"doesn't match expected lambda_min {lambda_min:.2f} Å (within tolerance {tolerance:.2f} Å)."
         )
-    if wavelength[-1] > HANDCRAFTED_WL_MAX:
+    if not np.isclose(wl_angstrom[-1], lambda_max, atol=tolerance):
         raise ValueError(
-            f"Error #8 (check_wavelengthflux): Last wavelength {wavelength[-1]} exceeds maximum allowed value {HANDCRAFTED_WL_MAX}"
+            f"Error 9.2 (check_wavelengthflux): Last wavelength {wl_angstrom[-1]:.2f} Å "
+            f"doesn't match expected lambda_max {lambda_max:.2f} Å (within tolerance {tolerance:.2f} Å)."
         )
 
-    # 5. Check flux units and convert
+    # --- Check 3: Wavelength Monotonicity ---
+    if not check_wavelength_increasing(wl_angstrom):
+        # Check performed *after* potential unit conversion
+        raise ValueError(
+            "Error 9.3 (check_wavelengthflux): Wavelength values are not strictly monotonically increasing."
+        )
 
+    # --- Check 4: Wavelength Physical Plausibility ---
+    # Check against hand-defined plausible range for typical optical/NIR spectra.
+    if wl_angstrom[0] < HANDCRAFTED_WL_MIN:
+        raise ValueError(
+            f"Error 10.1 (check_wavelengthflux): First wavelength {wl_angstrom[0]:.2f} Å "
+            f"is below minimum plausible value {HANDCRAFTED_WL_MIN} Å."
+        )
+    if wl_angstrom[-1] > HANDCRAFTED_WL_MAX:
+        raise ValueError(
+            f"Error 10.2 (check_wavelengthflux): Last wavelength {wl_angstrom[-1]:.2f} Å "
+            f"exceeds maximum plausible value {HANDCRAFTED_WL_MAX} Å."
+        )
+
+    # --- Check 5: Flux Unit Validation ---
     if spec_unit == "erg cm(-2) sec(-1) Ang(-1)":
+        # Units are explicitly the standard ones we expect. Pass.
+        # Could add an optional sanity check here using check_flux_units_erg_cm2_s_ang if desired.
         pass
     elif spec_unit == "Other":
+        # Units are marked as 'Other' in metadata. Perform heuristic check.
         if not check_flux_units_erg_cm2_s_ang(flux):
-            raise NotImplementedError(
-                f"Error #9 (check_wavelengthflux): Flux units are 'Other' but do not resemble expected erg cm(-2) sec(-1) Ang(-1) values."
+            median_abs_flux = np.nanmedian(
+                np.abs(flux)
+            )  # Recalculate for error message
+            raise ValueError(
+                f"Error 11.1 (check_wavelengthflux): Flux units are 'Other' but fail plausibility check "
+                f"for 'erg cm(-2) s(-1) Å(-1)'. Median absolute flux {median_abs_flux:.2e} is outside the "
+                f"expected range ({FLUX_UNIT_CHECK_MIN_MAG:.1e} - {FLUX_UNIT_CHECK_MAX_MAG:.1e}) "
+                f"or signal positivity is too low (<{MIN_POSITIVE_FLUX_FRACTION_UNIT_CHECK * 100}%)."
             )
-    else:
-        # if spec_unit=="mJy":
-        #     flux = ###
         # else:
-        # raise NotImplementedError # add message and mention spec_unit
+        #     # Optional: Inform user that 'Other' units passed the heuristic check
+        #     # warnings.warn(
+        #     #     "Flux units marked as 'Other' passed the plausibility check for erg cm^-2 s^-1 Å^-1.",
+        #     #     UserWarning,
+        #     # )
+    else:
+        # Handle specific known units that require conversion (e.g., Jy, mJy) or fail if unknown.
+        # Example placeholder:
+        # if spec_unit == "mJy":
+        #     # flux_converted = convert_mJy_to_flam(flux, wl_angstrom)
+        #     # flux = flux_converted # Replace flux with converted values for subsequent checks
+        #     raise NotImplementedError("Flux conversion from mJy not yet implemented.")
+        # else:
         raise NotImplementedError(
-            f"Error #10 (check_wavelengthflux): Spectral unit conversion from '{spec_unit}' not implemented"
-        )  # add message and mention spec_unit
-
-    # 6. Check if flux are all positive
-    if not check_flux_positive(flux):
-        raise ValueError(
-            "Error #11 (check_wavelengthflux): Flux is not sufficiently positive!"
+            f"Error 11.2 (check_wavelengthflux): Spectral unit '{spec_unit}' is not recognized "
+            f"or conversion/validation logic is not implemented."
         )
+
+    # --- Check 6: Flux Positivity ---
+    # Ensure a sufficient fraction of the flux is positive (avoids pure noise, over-subtraction issues).
+    if not check_flux_positive(flux):
+        # Calculate actual fraction for a more informative error message
+        with warnings.catch_warnings():  # Suppress potential warning from nanmean
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            positive_fraction = np.nanmean(flux > 0) if len(flux) > 0 else 0
+        raise ValueError(
+            f"Error 12.1 (check_wavelengthflux): Flux signal is not sufficiently positive. "
+            f"Required >{MIN_POSITIVE_FLUX_FRACTION*100:.0f}% positive fraction, found {positive_fraction*100:.1f}%."
+        )
+
+    # --- Success ---
+    # All checks passed. (Return value wl_angstrom isn't used by caller currently, but kept for potential future use)
+    return wl_angstrom
+
+
+# ==============================================================================
+# ==                      MAIN WRAPPER FUNCTION                               ==
+# ==============================================================================
 
 
 def check_and_plot_spectra(
@@ -595,41 +692,129 @@ def check_and_plot_spectra(
     plot=True,
 ):
     """
-    Wrapper function that loads a spectrum file, performs validation checks, and optionally plots it.
+    Load, validate, and optionally plot a single astronomical spectrum.
 
-    Gets validated column names from check_spectrafile to ensure correct plotting.
+    This function orchestrates the process:
+    1. Locates the spectrum file.
+    2. Looks up corresponding metadata.
+    3. Reads the spectrum file using `read_spectra`.
+    4. Extracts necessary metadata parameters.
+    5. Validates the data using `check_spectrafile`.
+    6. If `plot=True` and validation succeeds, generates a plot.
+
+    Handles errors gracefully at each step, printing informative messages.
     """
-    if meta_df.index.name != "Ascii file":
-        meta_df.set_index("Ascii file")
-        print("Setting ascii file as index.")
-    spectra_meta = meta_df.loc[spectra_fn]
-    spectra_df = read_spectra(os.path.join(spectra_dir, spectra_fn))
+    spectra_filepath = os.path.join(spectra_dir, spectra_fn)
 
-    wl_unit = spectra_meta["WL Units"]
-    spec_unit = spectra_meta["Spec. units"]
-    # flux_ucoeff = spectra_meta["Flux Unit Coefficient"]
-    lambda_min = spectra_meta["Lambda-min"]
-    lambda_max = spectra_meta["Lambda-max"]
-    del_lambda = spectra_meta["Del-Lambda"]
+    try:
+        # --- Step 1: Metadata Lookup ---
+        # Ensure the DataFrame index is set to 'Ascii file' for efficient lookup.
+        # Use a copy if modification is needed to avoid side effects outside the function.
+        if meta_df.index.name != "Ascii file":
+            meta_df_indexed = meta_df.set_index("Ascii file", drop=False)  # Keep column
+        else:
+            meta_df_indexed = meta_df
 
-    # Perform validation checks and get identified column names
-    wl_col, flux_col = check_spectrafile(
-        spectra_df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
-    )
+        try:
+            spectra_meta = meta_df_indexed.loc[spectra_fn]
+        except KeyError:
+            # Specific error for missing metadata entry
+            raise ValueError(
+                f"Error 13.1 (check_and_plot_spectra): Metadata lookup failed. No entry found for '{spectra_fn}' in the provided meta_df."
+            )
 
-    # Plot the spectrum if requested
-    if plot:
-        # Use identified column names for plotting
-        x = spectra_df[wl_col].to_numpy()  # wavelength
-        y = spectra_df[flux_col].to_numpy()  # flux
-        plt.figure(figsize=(10, 6))
-        plt.plot(x, y)
-        plt.xlabel("Wavelength (Å)")
-        plt.ylabel("Flux (erg cm$^{-2}$ s$^{-1}$ Å$^{-1}$)")
-        plt.title(f"Spectrum: {os.path.basename(spectra_fn)}")
-        plt.grid(True, alpha=0.3)
-        plt.show()
+        # --- Step 2: File Reading ---
+        # `read_spectra` handles multiple formats and raises FileNotFoundError or ValueError (Error 2.x) on failure.
+        spectra_df = read_spectra(spectra_filepath)
+
+        # --- Step 3: Extract Metadata for Validation ---
+        # Access metadata values *after* confirming lookup and file read were successful.
+        try:
+            wl_unit = spectra_meta["WL Units"]
+            spec_unit = spectra_meta["Spec. units"]
+            lambda_min = spectra_meta["Lambda-min"]
+            lambda_max = spectra_meta["Lambda-max"]
+            del_lambda = spectra_meta["Del-Lambda"]
+        except KeyError as e:
+            # Handle missing *specific columns* within the found metadata entry
+            raise ValueError(
+                f"Error processing '{spectra_fn}': Metadata entry found, but required column '{e}' is missing."
+            )
+
+        # --- Step 4: Data Validation ---
+        # `check_spectrafile` performs comprehensive checks and returns column names.
+        # Raises ValueError (Errors 3.x-6.x) or propagates errors from `check_wavelengthflux` (Errors 7.x-12.x) or NotImplementedError.
+        wl_col, flux_col = check_spectrafile(
+            spectra_df, wl_unit, spec_unit, lambda_min, lambda_max, del_lambda
+        )
+
+        # --- Step 5: Plotting (Optional) ---
+        if plot:
+            try:
+                # Extract validated data columns for plotting, converting to float just in case
+                x = spectra_df[wl_col].astype(float).values
+                y = spectra_df[flux_col].astype(float).values
+            except (ValueError, TypeError) as e:
+                # Catch potential errors during final data extraction/conversion for plotting
+                raise ValueError(
+                    f"Error 14.1 (check_and_plot_spectra): Failed to convert validated data to numeric for plotting '{spectra_fn}'. Column: '{e}'. Original error: {type(e).__name__}"
+                )
+
+            # Define plot labels (assuming validation implies standard units or successful conversion/plausibility check)
+            # TODO: Make labels dynamic based on validated/converted units if necessary
+            plot_wl_unit_label = "Wavelength ($\AA$)"
+            plot_spec_unit_label = (
+                r"Flux (erg cm$^{-2}$ s$^{-1} \AA ^{-1}$)"  # Use raw string for LaTeX
+            )
+
+            # Generate the plot
+            plt.figure(figsize=(10, 6))
+            plt.plot(x, y, lw=1)  # Use slightly thinner line
+            plt.xlabel(plot_wl_unit_label)
+            plt.ylabel(plot_spec_unit_label)
+            plt.title(f"Spectrum: {os.path.basename(spectra_fn)}")
+            plt.grid(True, linestyle="--", alpha=0.6)  # Slightly adjust grid style
+            plt.tight_layout()  # Adjust layout to prevent labels overlapping
+            plt.show()
+
+    # --- Exception Handling Block ---
+    # Catch specific errors first, then more general ones.
+    except FileNotFoundError as e:
+        print(f"❌ Error processing '{spectra_fn}': File not found. {e}")
+    except KeyError as e:
+        # Catches KeyErrors from the *initial* metadata lookup (.loc) if index wasn't set properly,
+        # or potentially from the final plotting data extraction if columns vanished (unlikely).
+        # Specific missing columns inside metadata are handled above.
+        print(f"❌ Error processing '{spectra_fn}': Metadata key error. {e}")
+    except ValueError as e:
+        # Catches all ValueErrors raised by read_spectra, check_spectrafile, check_wavelengthflux,
+        # metadata lookup (Error 13.1), or plotting data conversion (Error 14.1).
+        # The error message 'e' should contain the specific error code (X.Y).
+        print(f"❌ Validation Error processing '{spectra_fn}': {e}")
+    except NotImplementedError as e:
+        # Catches errors related to unimplemented unit conversions (Error 8.1, 11.2).
+        print(
+            f"❌ Processing Error processing '{spectra_fn}': Feature not implemented. {e}"
+        )
+    except Exception as e:
+        # Catch any other unexpected errors (e.g., plotting library issues, unforeseen file issues).
+        print(
+            f"❌ An unexpected error occurred while processing '{spectra_fn}': {type(e).__name__} - {e}"
+        )
 
 
-# LIMIT TO FEW DAYS BEFORE AND MAXIMUM OF SPECTRA - FOR NOW
-# def ####
+# ==============================================================================
+# ==                      FUTURE WORK / NOTES                                 ==
+# ==============================================================================
+
+# TODO: Add proper unit tests (pytest?) - Crucial for ensuring robustness against diverse and potentially messy spectral file formats.
+# TODO: Refine read_spectra error handling - Catch more specific I/O or parsing errors from astropy/pandas for clearer debugging, especially during batch processing.
+# TODO: Implement astropy.units - Using Quantity objects would provide robust unit tracking and automated, safe conversions. Highly recommended for long-term maintainability.
+# TODO: Add type hints - Once the structure is stable, add type hints (e.g., using typing module) for improved static analysis and developer understanding.
+# TODO: Refine check_wavelengthflux NaN handling - Decide if certain NaNs in flux (e.g., at spectral edges) are acceptable and adjust logic accordingly.
+# TODO: Robustness of check_spectrafile row count - The current check is basic; consider edge cases or alternative methods if needed.
+# TODO: Dynamic Plot Labels - Update plotting section to use actual units derived from metadata or conversion results rather than assuming Angstrom/erg...
+# TODO: Configuration Management - Move constants like HANDCRAFTED_WL_MIN/MAX, magnitude limits, etc., to a config file or the fetched settings dictionary for easier modification.
+# TODO: Consider adding logging instead of print statements for errors, especially for batch processing.
+# LIMIT TO FEW DAYS BEFORE AND MAXIMUM OF SPECTRA - FOR NOW #<-- Placeholder comment from original code
+# def #### <-- Placeholder comment from original code
