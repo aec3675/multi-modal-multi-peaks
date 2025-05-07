@@ -5,20 +5,31 @@ This directory contains my reimplementation of the WISeREP download for comprehe
 ## Directory Structure
 
 ### 0. example of spectra - sdss/
-Contains example SDSS spectra and notebooks demonstrating how to work with FITS files using AstroPy. This is a reference for myself to see the SDSS spectral format.
+Example SDSS spectra and notebooks demonstrating how to work with FITS files using AstroPy. This is a reference for myself to see the SDSS spectral format.
 
-### 1. Download ALL WISe data
+### 1. Download ALL WISeRep data
 Scripts and notebooks for systematically downloading supernova spectra from the WISeREP repository. 
 - `wiserep_downloader.py`: Downloads all spectra.
 
-### 2. Read and make single dataset
-This directory will contain scripts for combining and standardizing the SDSS and WISeREP data into a single big dataset (`tensors`).
+### 2. EDA Metadata and Spectra
+Some EDA for me to see while I read spectra; to see what kinds of objects are failing, and then iteratively handle them later in #3 (Read and Make Single Dataset).
+
+### 3. Read and Make Single Dataset
+Scripts for combining and standardizing the SDSS and WISeREP data into a single big dataset (`tensors`). As of April 19, I have successfully read 45,062 of the 54,005 spectra downloaded, and ran basic tests on them to make sure the wavelength and flux read make sense. (See the [script](https://github.com/sidchaini/Death-and-Taxes/blob/main/sidchaini/sidhelpers.py) for more details on the checks.
+
 
 — Sid Chaini
 
 
-## Updates / Changelog
+## Changelog
 While creating this dataset, I decided to keep a log of every single thing I've done, to maintain reproducibility.
+- **2025-05-07**:
+    - Some other things have popped up for this month, but I'll be returning to this in June!
+
+- **2025-04-18**:
+    - Created a [helper script](https://github.com/sidchaini/Death-and-Taxes/blob/main/sidchaini/sidhelpers.py) to run common-sense checks on the data being read. This is to ensure that the automated reading of spectra gives us trends we expect: units, range, monotonicity, positivity etc. Take a look at the script for more details!
+    - Iteratively modified the helper script to keep eliminating points of failure for spectra reading, and ended with 45,062 of the 54,005 spectra being successfully read (and passing above checks).
+
 - **2025-03-10**: 
     - Downloaded all spectra and zip files by running script in `1. download ALL wise data`. 
     - Once downloaded, I consolidated everything into a single header file `wiserep_spectra_combined.csv` and a `spectra.tar.gz`. 
