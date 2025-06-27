@@ -35,7 +35,7 @@ def submit_post(ra_list, dec_list, jd_start, jd_end):
     print("Status_code=",r.status_code)
     
 
-def check_status(datadir=''):
+def check_status(datadir='', download=False, num_objs=float):
     settings = {'email': 'pnr5sh@virginia.edu','userpass': 'vhnp411',
             'option': 'All recent jobs', 'action': 'Query Database'}
     r = requests.get('https://ztfweb.ipac.caltech.edu/cgi-bin/getBatchForcedPhotometryRequests.cgi',
@@ -47,17 +47,15 @@ def check_status(datadir=''):
         wget_url = 'https://ztfweb.ipac.caltech.edu'
         wget_suffix = "'"
         lightcurves = re.findall(r'/ztf/ops.+?lc.txt\b',r.text)
-        if lightcurves is not None:
-            for lc in lightcurves:
-                p = re.match(r'.+/(.+)', lc)
-                fileonly = p.group(1)
-                print(wget_prefix + " " + fileonly + " \'" + wget_url + lc + wget_suffix)
-                
-                # url = "'"+ wget_url + lc + "'"
-                # savefile = str(datadir)+lc[-29:]
-                # os.system(f"wget -c -O {savefile} {shlex.quote(url)}")
-        else:
-            print("error: lightcurve object is None")
+        if download:
+            if lightcurves is not None:
+                for lc in lightcurves[-num_objs:]:
+                    url = wget_url + lc
+                    savefile = str(datadir)+lc[-29:]
+                    # print(savefile)
+                    os.system(f"{wget_prefix} {savefile} {shlex.quote(url)}")
+            else:
+                print("error: lightcurve object is None")
     else:
         print("Status_code=",r.status_code,"; Jobs either queued or abnormal execution.")
 
@@ -86,11 +84,25 @@ def setup_arg_parser() -> argparse.ArgumentParser:
         help="csv file containing ra, dec, jd_spec for each object, new objs separated by line",
     )
     control_group.add_argument(
+        "-s",
+        "--submitQuery",
+        type=str,
+        default=False,
+        help="submit new query to ZTF FP database",
+    )
+    control_group.add_argument(
         "-c",
-        "--checkStatusOnly",
+        "--checkStatus",
         type=str,
         default=False,
         help="only check the status of the last batch query, will not re-query",
+    )
+    control_group.add_argument(
+        "-w",
+        "--download",
+        type=str,
+        default=False,
+        help="download data from ZTF FP",
     )
     return parser
 
@@ -108,18 +120,30 @@ def main():
     jd_start = data['jd_start'].to_numpy().tolist()
     jd_end = data['jd_end'].to_numpy().tolist()
 
-    print(f"Number of (ra,dec) pairs = {len(ras)}")
+    if args.submitQuery=='True':
+        print('Submitting query to ZTF...\n')
+        print(f"Number of (ra,dec) pairs = {len(ras)}\n")
 
-    if len(ras) != len(decs) != len(jd_start) != len(jd_end):
-        print('unequal len of inputs, exiting...')
+        if len(ras) != len(decs) != len(jd_start) != len(jd_end):
+            print('unequal len of inputs, exiting...')
+            exit()
+            
+        submit_post(ras, decs, jd_start, jd_end)                     #submit query
+    
+    if args.checkStatus=='True':
+        print('Checking status of latest query...\n')
+        check_status(datadir=args.datadir,download=False,num_objs=len(ras))            #check query
+    
+    if args.download=='True':
+        print('Downloading data from latest query...\n')
+        check_status(datadir=args.datadir,download=args.download,num_objs=len(ras))    #check query + download data
+
+    if not args.submitQuery and not args.checkStatus and not args.download:
+        print('No action specified, exiting...')
         exit()
-
-    if not args.checkStatusOnly:
-        submit_post(ras, decs, jd_start, jd_end) #submit query
-        check_status(datadir=args.datadir)                           #check query
-    else:
-        print('Only checking status of latest query...\n')
-        check_status(datadir=args.datadir)
+    elif args.submitQuery=='False' and args.checkStatus=='False' and args.download=='False':
+        print('No action specified, exiting...')
+        exit()
 
 if __name__ == "__main__":
     main()
