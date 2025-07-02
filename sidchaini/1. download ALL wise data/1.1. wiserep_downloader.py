@@ -696,7 +696,7 @@ def download_all_wiserep_data(
 
     results = {}
     consecutive_empty_pages = 0
-    max_consecutive_empty = 5
+    MAX_CONSECUTIVE_EMPTY = 5
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
         current_page = start_page
@@ -735,12 +735,12 @@ def download_all_wiserep_data(
 
                         if not success:
                             # Check for consecutive failures
-                            last_pages = sorted(results.keys())[-max_consecutive_empty:]
-                            if len(last_pages) == max_consecutive_empty and all(
+                            last_pages = sorted(results.keys())[-MAX_CONSECUTIVE_EMPTY:]
+                            if len(last_pages) == MAX_CONSECUTIVE_EMPTY and all(
                                 not results.get(p) for p in last_pages
                             ):
                                 logger.info(
-                                    f"Detected {max_consecutive_empty} consecutive empty pages. Stopping."
+                                    f"Detected {MAX_CONSECUTIVE_EMPTY} consecutive empty pages. Stopping."
                                 )
                                 # Cancel remaining futures
                                 for f in futures:
@@ -824,7 +824,7 @@ def verify_and_combine_data(
 
     for col in ["IAU name", "Publish", "Remarks", "Created by"]:
         if col in combined_df.columns:
-            combined_df[col] = combined_df[col].str.strip()
+            combined_df[col] = combined_df[col].astype(str).str.strip()
 
     combined_df.to_csv(output_file, index=False)
     logger.info(
