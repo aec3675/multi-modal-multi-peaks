@@ -1,0 +1,2 @@
+#sn_name peak_mjd peak_mag filt
+2021krf 59342.45218382659 17.075530037793797 ZTF_g
